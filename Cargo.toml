@@ -6,3 +6,21 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+fnv = "1.0.7"
+futures = "0.3.21"
+ipfs-bitswap = "0.1.0"
+tracing = "0.1.32"
+void = "1.0.2"
+multibase = "0.9.1"
+thiserror = "1.0.30"
+cid = "0.8.3"
+
+[dependencies.libp2p]
+version = "0.43.0" 
+default-features = false
+features = [
+    "identify", "kad", "tcp-tokio", "mplex",
+    "mdns", "noise", "ping", "yamux", "dns-tokio",
+]
+
+[features]
