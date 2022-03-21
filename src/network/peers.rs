@@ -122,10 +122,10 @@ impl AddressBook {
         }
         let discovered = !self.peers.contains_key(peer);
         let info = self.peers.entry(*peer).or_default();
-        if !info.addresses.contains_key(&address) {
+        info.addresses.entry(address.clone()).or_insert_with(|| {
             trace!("adding address {} from {:?}", address, source);
-            info.addresses.insert(address, source);
-        }
+            source
+        });
         if discovered {
             self.notify(Event::Discovered(*peer));
         }
@@ -134,7 +134,7 @@ impl AddressBook {
     pub fn remove_address(&mut self, peer: &PeerId, address: &Multiaddr) {
         if let Some(info) = self.peers.get_mut(peer) {
             tracing::trace!("removing address {}", address);
-            info.addresses.remove(&address);
+            info.addresses.remove(address);
         }
     }
 

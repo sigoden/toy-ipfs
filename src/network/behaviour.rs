@@ -1,17 +1,19 @@
-use ipfs_bitswap::{Bitswap, BitswapEvent};
 use libp2p::core::PublicKey;
-use libp2p::identify::{Identify, IdentifyEvent};
-use libp2p::kad::record::Key;
+use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
 use libp2p::kad::record::store::MemoryStore;
-use libp2p::kad::{Kademlia, KademliaEvent, Record, Quorum};
-use libp2p::mdns::{Mdns, MdnsEvent};
+use libp2p::kad::record::Key;
+use libp2p::kad::{Kademlia, KademliaConfig, KademliaEvent, Quorum, Record};
+use libp2p::mdns::{Mdns, MdnsConfig, MdnsEvent};
 use libp2p::ping::{Ping, PingEvent, PingFailure, PingSuccess};
+use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::NetworkBehaviourEventProcess;
-use libp2p::{Multiaddr, PeerId};
+use libp2p::{Multiaddr, NetworkBehaviour, PeerId};
 use multibase::Base;
+use toy_ipfs_bitswap::{Bitswap, BitswapEvent};
 
 use crate::error::{Error, Result};
 use crate::network::peers::{AddressBook, AddressSource, Event, PeerInfo};
+use crate::network::IpfsNetworkConfig;
 use crate::subscription::{SubscriptionFuture, SubscriptionRegistry};
 
 /// Represents the result of a Kademlia query.
@@ -25,14 +27,16 @@ pub enum KadResult {
     Records(Vec<Record>),
 }
 
+#[derive(NetworkBehaviour)]
+#[behaviour(event_process = true)]
 pub struct IpfsBehaviour {
     identify: Identify,
     ping: Ping,
-    mdns: Mdns,
+    mdns: Toggle<Mdns>,
     kad: Kademlia<MemoryStore>,
     bitswap: Bitswap,
     peers: AddressBook,
-    bootstrap_complete: bool,
+    #[behaviour(ignore)]
     kad_subscriptions: SubscriptionRegistry<KadResult, String>,
 }
 
@@ -93,7 +97,6 @@ impl NetworkBehaviourEventProcess<KademliaEvent> for IpfsBehaviour {
                             peer, num_remaining
                         );
                         if num_remaining == 0 {
-                            self.bootstrap_complete = true;
                             self.peers.notify(Event::Bootstrapped);
                         }
                     }
@@ -304,7 +307,7 @@ impl NetworkBehaviourEventProcess<KademliaEvent> for IpfsBehaviour {
 }
 
 impl NetworkBehaviourEventProcess<BitswapEvent> for IpfsBehaviour {
-    fn inject_event(&mut self, event: BitswapEvent) {
+    fn inject_event(&mut self, _event: BitswapEvent) {
         todo!()
     }
 }
@@ -317,11 +320,7 @@ impl NetworkBehaviourEventProcess<PingEvent> for IpfsBehaviour {
                 peer,
                 result: Result::Ok(PingSuccess::Ping { rtt }),
             } => {
-                trace!(
-                    "ping: rtt to {} is {} ms",
-                    peer,
-                    rtt.as_millis()
-                );
+                trace!("ping: rtt to {} is {} ms", peer, rtt.as_millis());
                 self.peers.set_rtt(&peer, Some(rtt));
             }
             PingEvent {
@@ -372,8 +371,62 @@ impl NetworkBehaviourEventProcess<IdentifyEvent> for IpfsBehaviour {
 }
 
 impl IpfsBehaviour {
-    pub fn new() {
-        todo!()
+    pub async fn create(config: IpfsNetworkConfig) -> Result<Self> {
+        let node_public_key = config.node_key.public();
+        let peer_id = node_public_key.to_peer_id();
+        info!("net: starting with peer id {}", &peer_id);
+        let mdns = if config.mdns {
+            Some(
+                Mdns::new(MdnsConfig::default())
+                    .await
+                    .map_err(Error::NewMdnsError)?,
+            )
+        } else {
+            None
+        };
+
+        let store = MemoryStore::new(peer_id);
+
+        let mut kad_config = KademliaConfig::default();
+        kad_config.disjoint_query_paths(true);
+        kad_config.set_query_timeout(std::time::Duration::from_secs(300));
+
+        if let Some(protocol) = config.kad_protocol {
+            kad_config.set_protocol_name(protocol.into_bytes());
+        }
+        let mut kad = Kademlia::with_config(peer_id, store, kad_config);
+
+        for (addr, peer_id) in &config.bootstrap {
+            kad.add_address(peer_id, addr.to_owned());
+        }
+
+        let bitswap = Bitswap::default();
+        let ping = Ping::default();
+        let identify = Identify::new(
+            IdentifyConfig::new("/ipfs/0.1.0".into(), config.node_key.public())
+                .with_agent_version("toy-ipfs".into()),
+        );
+
+        for (addr, peer_id) in &config.bootstrap {
+            kad.add_address(peer_id, addr.to_owned());
+        }
+
+        let peers = AddressBook::new(
+            peer_id,
+            config.node_name,
+            node_public_key,
+            config.prune_addresses,
+        );
+
+        Ok(IpfsBehaviour {
+            mdns: mdns.into(),
+            peers,
+            kad,
+            kad_subscriptions: Default::default(),
+            bitswap,
+            ping,
+            identify,
+        })
     }
     pub fn local_public_key(&self) -> &PublicKey {
         self.peers.local_public_key()
@@ -423,10 +476,6 @@ impl IpfsBehaviour {
         }
     }
 
-    pub fn is_bootstrapped(&self) -> bool {
-        self.bootstrap_complete
-    }
-
     pub fn get_closest_peers(&mut self, id: PeerId) -> SubscriptionFuture<KadResult, String> {
         self.kad_subscriptions
             .create_subscription(self.kad.get_closest_peers(id).into(), None)
@@ -436,10 +485,7 @@ impl IpfsBehaviour {
         self.kad_subscriptions
             .create_subscription(self.kad.get_providers(key).into(), None)
     }
-    pub fn start_providing(
-        &mut self,
-        key: Key,
-    ) -> Result<SubscriptionFuture<KadResult, String>> {
+    pub fn start_providing(&mut self, key: Key) -> Result<SubscriptionFuture<KadResult, String>> {
         match self.kad.start_providing(key) {
             Ok(id) => Ok(self.kad_subscriptions.create_subscription(id.into(), None)),
             Err(e) => {
@@ -448,12 +494,16 @@ impl IpfsBehaviour {
             }
         }
     }
-    pub fn get_record(&mut self, key: Key, quorum: Quorum) -> SubscriptionFuture<KadResult, String> {
+    pub fn get_record(
+        &mut self,
+        key: Key,
+        quorum: Quorum,
+    ) -> SubscriptionFuture<KadResult, String> {
         self.kad_subscriptions
             .create_subscription(self.kad.get_record(key, quorum).into(), None)
     }
 
-    pub fn dht_put(
+    pub fn put_record(
         &mut self,
         key: Key,
         value: Vec<u8>,

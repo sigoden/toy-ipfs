@@ -8,12 +8,14 @@ edition = "2021"
 [dependencies]
 fnv = "1.0.7"
 futures = "0.3.21"
-ipfs-bitswap = "0.1.0"
+toy-ipfs-bitswap = { path = "./bitswap" }
 tracing = "0.1.32"
+tracing-futures = { default-features = false, features = ["std-future", "std", "futures-03"], version = "0.2" }
 void = "1.0.2"
 multibase = "0.9.1"
 thiserror = "1.0.30"
 cid = "0.8.3"
+tokio = { default-features = false, features = ["fs", "macros", "rt-multi-thread", "sync"], version = "1.0" }
 
 [dependencies.libp2p]
 version = "0.43.0" 
@@ -22,5 +24,8 @@ features = [
     "identify", "kad", "tcp-tokio", "mplex",
     "mdns", "noise", "ping", "yamux", "dns-tokio",
 ]
+
+[workspace]
+members = [ "bitswap" ]
 
 [features]
